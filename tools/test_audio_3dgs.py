@@ -38,12 +38,16 @@ def parse_args():
         '--video',
         help='video/scene name',
         type=str)
+    parser.add_argument(
+        'opts',
+        help="Modify config options using the command-line",
+        default=None,
+        nargs=argparse.REMAINDER)
     
-    args, rest = parser.parse_known_args()
+    args = parser.parse_args()
     
     # Update config
-    update_config(cfg, args.yaml_file)
-    cfg = misc.parse_command_line_and_update_config(cfg, rest)
+    update_config(cfg, args)
     
     if args.output_dir:
         cfg.output_dir = args.output_dir
@@ -57,13 +61,14 @@ def main():
     args, cfg = parse_args()
     
     # Setup logger
-    logger = create_logger(cfg, cfg.output_dir, 'test')
+    logger, final_output_dir = create_logger(cfg)
     logger.info(f"Testing with config: {args.yaml_file}")
     logger.info(f"Checkpoint: {args.checkpoint}")
+    logger.info(f"Output directory: {final_output_dir}")
     
     # Build dataset
     logger.info("Creating test dataset...")
-    dataset_module = impm(f"libs.datasets.{cfg.dataset.dataset}")
+    dataset_module = impm(f"{cfg.dataset.name}")
     test_loader = dataset_module.make_data_loader(cfg, 'val', distributed=False)
     
     logger.info(f"Test samples: {len(test_loader.dataset)}")
@@ -75,8 +80,12 @@ def main():
     
     # Load checkpoint
     logger.info(f"Loading checkpoint: {args.checkpoint}")
-    checkpoint = load_checkpoint(args.checkpoint)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    if os.path.exists(args.checkpoint):
+        checkpoint = torch.load(args.checkpoint, map_location='cpu')
+        model.load_state_dict(checkpoint['model_state_dict'])
+        logger.info(f"Successfully loaded checkpoint from {args.checkpoint}")
+    else:
+        raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
     
     # Move to GPU
     if torch.cuda.is_available():
@@ -86,8 +95,8 @@ def main():
     model.eval()
     
     # Build evaluator
-    evaluator_module = impm("libs.evaluators.gen_eval")
-    evaluator = evaluator_module.get_evaluator(cfg)
+    from libs.evaluators.gen_eval import Evaluator
+    evaluator = Evaluator(cfg, 'audio_3dgs', sampling_rate=cfg.dataset.sr)
     
     # Test loop
     logger.info("Starting evaluation...")
@@ -121,22 +130,44 @@ def main():
             
             # Evaluate metrics for this batch
             if evaluator:
-                batch_metrics = evaluator.evaluate(
-                    pred_binaural.numpy(),
-                    target_binaural.numpy(),
-                    cfg.dataset.sampling_rate
-                )
+                # Ensure correct format for evaluator: [2, length]
+                pred_for_eval = pred_binaural.squeeze().numpy()
+                target_for_eval = target_binaural.squeeze().numpy()
                 
-                for key, value in batch_metrics.items():
-                    if key not in all_metrics:
-                        all_metrics[key] = []
-                    all_metrics[key].append(value)
+                # Ensure stereo format
+                if pred_for_eval.ndim == 1:
+                    pred_for_eval = np.stack([pred_for_eval, pred_for_eval])
+                elif pred_for_eval.shape[0] != 2:
+                    pred_for_eval = pred_for_eval.T
+                    
+                if target_for_eval.ndim == 1:
+                    target_for_eval = np.stack([target_for_eval, target_for_eval])
+                elif target_for_eval.shape[0] != 2:
+                    target_for_eval = target_for_eval.T
+                
+                # Call evaluator (this adds metrics to evaluator.metrics internally)
+                evaluator.evaluate(pred_for_eval, target_for_eval, sr=cfg.dataset.sr)
     
-    # Calculate average metrics
+    # Get metrics from evaluator
+    logger.info("Computing final metrics...")
+    
     avg_metrics = {}
-    for key, values in all_metrics.items():
-        avg_metrics[key] = np.mean(values)
-        logger.info(f"{key}: {avg_metrics[key]:.4f}")
+    for key, values in evaluator.metrics.items():
+        if values:  # Only process non-empty metrics
+            avg_metrics[key] = np.mean(values)
+    
+    # Map to standard metric names for reporting
+    metric_mapping = {
+        'stft_mse': 'MAG',      # Magnitude Spectrogram Distance
+        'left_right_err': 'LRE', # Left-Right Energy Ratio Error  
+        'env': 'ENV',           # Envelope Distance
+        'dpam': 'RTE'           # RT60 Error (using DPAM as proxy)
+    }
+    
+    final_metrics = {}
+    for original_key, readable_key in metric_mapping.items():
+        if original_key in avg_metrics:
+            final_metrics[readable_key] = avg_metrics[original_key]
     
     # Save results
     results = {
@@ -146,7 +177,7 @@ def main():
         'config': cfg
     }
     
-    results_path = os.path.join(cfg.output_dir, 'test_results.pkl')
+    results_path = os.path.join(final_output_dir, 'test_results.pkl')
     with open(results_path, 'wb') as f:
         pickle.dump(results, f)
     
@@ -154,10 +185,21 @@ def main():
     
     # Print summary
     logger.info("=" * 60)
-    logger.info("EVALUATION SUMMARY")
+    logger.info("AUDIO 3DGS EVALUATION SUMMARY")
     logger.info("=" * 60)
+    
+    # Print the four main metrics from AV-Cloud paper
+    if final_metrics:
+        for key, value in final_metrics.items():
+            logger.info(f"{key:>10}: {value:.4f}")
+    else:
+        logger.info("No metrics computed - check evaluator functionality")
+        
+    # Also print all available metrics for debugging
+    logger.info("-" * 60)
+    logger.info("ALL COMPUTED METRICS:")
     for key, value in avg_metrics.items():
-        logger.info(f"{key:>10}: {value:.4f}")
+        logger.info(f"{key:>15}: {value:.4f}")
     logger.info("=" * 60)
     
     logger.info("Testing completed!")

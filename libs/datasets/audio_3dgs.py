@@ -72,36 +72,45 @@ class Audio3DGSDataset(data.Dataset):
         
         # Get the minimum length between audio and camera data
         num_cameras = len(transforms_data['camera_path'])
-        num_audio_samples = binaural_audio.shape[0] if binaural_audio.ndim > 1 else 1
-        num_samples = min(num_cameras, num_audio_samples)
+        
+        # For audio, we need to segment the long audio into frames
+        # Each camera frame corresponds to a time segment in the audio
+        fps = transforms_data.get('fps', 24)
+        sr = self.sampling_rate
+        samples_per_frame = int(sr / fps)  # Audio samples per camera frame
+        
+        # Calculate how many complete frames we can extract
+        total_audio_samples = binaural_audio.shape[-1]
+        max_audio_frames = total_audio_samples // samples_per_frame
+        num_samples = min(num_cameras, max_audio_frames)
+        
+        print(f"Audio frames available: {max_audio_frames}, Camera frames: {num_cameras}")
+        print(f"Using {num_samples} samples, {samples_per_frame} audio samples per frame")
         
         for i in range(num_samples):
-            # Extract binaural audio (target)
-            if binaural_audio.ndim == 3:  # [num_samples, 2, length]
-                binaural = binaural_audio[i]
-            else:  # [2, length] for single sample or [num_samples, length]
-                if binaural_audio.ndim == 2 and binaural_audio.shape[0] == 2:
-                    # Shape is [2, length] - stereo audio
-                    binaural = binaural_audio
-                elif binaural_audio.ndim == 2:
-                    # Shape is [num_samples, length] - mono samples
-                    binaural = np.stack([binaural_audio[i], binaural_audio[i]])
-                else:
-                    # Shape is [length] - single mono sample
-                    binaural = np.stack([binaural_audio, binaural_audio])
+            # Extract audio segment for this frame
+            start_sample = i * samples_per_frame
+            end_sample = start_sample + samples_per_frame
+            
+            # Extract binaural audio segment
+            if binaural_audio.ndim == 2 and binaural_audio.shape[0] == 2:
+                # Shape is [2, length] - stereo audio
+                binaural = binaural_audio[:, start_sample:end_sample]
+            else:
+                # Handle other shapes
+                binaural = binaural_audio[start_sample:end_sample]
+                if binaural.ndim == 1:
+                    binaural = np.stack([binaural, binaural])
                     
-            if binaural.shape[0] != 2:  # Ensure stereo
-                binaural = binaural.T
             self.binaural_audio.append(binaural)
             
-            # Extract source audio (mono reference)
+            # Extract source audio segment (if available)
             if source_audio is not None:
-                if source_audio.ndim == 2:  # [num_samples, length]
-                    source = source_audio[i]
-                    source = np.stack([source, source])  # Convert mono to stereo format
-                else:  # [length] for single sample
-                    source = source_audio
-                    source = np.stack([source, source])
+                if source_audio.ndim == 1:
+                    source_segment = source_audio[start_sample:end_sample]
+                    source = np.stack([source_segment, source_segment])
+                else:
+                    source = source_audio[:, start_sample:end_sample]
             else:
                 # Use mean of binaural as source
                 source_mono = binaural.mean(0)
@@ -109,8 +118,7 @@ class Audio3DGSDataset(data.Dataset):
             self.source_audio.append(source)
             
             # Extract camera pose
-            if i < len(transforms_data['camera_path']):
-                camera_data = transforms_data['camera_path'][i]
+            camera_data = transforms_data['camera_path'][i]
             transform_matrix = np.array(camera_data['camera_to_world']).reshape(4, 4)
             # Convert to cam_pose format: [x, y, z, R11, R12, R13, R21, R22, R23, R31, R32, R33]
             camera_center = transform_matrix[:3, 3]
