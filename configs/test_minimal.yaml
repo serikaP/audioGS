@@ -1,0 +1,17 @@
+# Minimal test config
+device: cuda
+seed: 42
+output_dir: audio_3dgs_test
+
+model:
+  file: audio_3dgs
+  use_visual: false
+
+dataset:
+  name: libs.datasets.audio_3dgs
+  video: '1'
+  sr: 22050
+  audio_len: 2.0
+
+train:
+  file: Audio3DGSTrainer

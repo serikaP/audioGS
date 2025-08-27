@@ -1,0 +1,55 @@
+# Audio 3D Gaussian Splatting Configuration
+# Based on AV-Cloud config but adapted for pure audio approach
+
+# Basic configuration
+device: cuda
+seed: 42
+output_dir: audio_3dgs
+log_dir: logs/audio_3dgs
+workers: 4
+
+# Model configuration
+model:
+  file: audio_3dgs
+  model_type: audio_3dgs
+  joint_emb_dim: 256
+  pretrained_encoder: ''
+  render_type: audio
+  use_visual: false
+
+# Dataset configuration
+dataset:
+  name: libs.datasets.audio_3dgs
+  data_root: data/avcloud_data/RWAVS
+  video: 1
+  sr: 22050
+  audio_len: 2.0
+  H: 513  # Spectrogram height (n_fft//2 + 1)
+  W: 256  # Spectrogram width (time frames)
+  N_points: 44718  # Total spectrogram pixels (513 * 256 - some padding)
+  train:
+    drop_last: true
+    shuffle: true
+    sampler: ''
+  test:
+    drop_last: false
+    shuffle: false
+    sampler: ''
+
+# Training configuration
+train:
+  file: Audio3DGSTrainer
+  max_epoch: 100
+  batch_size: 2
+  lr: 0.0001  # Reduce learning rate
+  lr_decay: 0.9
+  lr_decay_step: 10
+  weight_decay: 1e-4
+  grad_clip: 1.0  # Add gradient clipping
+  print_freq: 10
+  save_interval: 10
+  valiter_interval: 50
+  val_when_train: true
+  save_every_checkpoint: true
+  resume: false
+  criterion_file: BaseCriterion
